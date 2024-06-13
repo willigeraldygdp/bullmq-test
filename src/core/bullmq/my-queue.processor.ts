@@ -1,31 +1,41 @@
+import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
-import { Injectable } from '@nestjs/common';
-import {PushEmployeeService} from "../job/push-employee/push-employee.service";
-import {SyncEmployeeService} from "../job/sync-employee/sync-employee.service";
+import { DiscoveryService } from '@golevelup/nestjs-discovery';
+import {JOB_METADATA, JobMetadata} from './job.decorator';
 
 @Injectable()
 @Processor('my-queue')
-export class MyQueueProcessor extends WorkerHost {
+export class MyQueueProcessor extends WorkerHost implements OnModuleInit {
+    private jobHandlers: { [key: string]: Function } = {};
+    private readonly logger = new Logger(MyQueueProcessor.name);
+
     constructor(
-        private readonly syncEmployeeService: SyncEmployeeService,
-        private readonly pushEmployeeService: PushEmployeeService,
+        private readonly discoveryService: DiscoveryService,
     ) {
         super();
     }
 
+    async onModuleInit() {
+        const methods = await this.discoveryService.providerMethodsWithMetaAtKey<JobMetadata>(JOB_METADATA);
+
+        methods.forEach(({ discoveredMethod, meta }) => {
+            const { handler, parentClass } = discoveredMethod;
+            const instance = parentClass.instance;
+
+            this.jobHandlers[`${meta.queue}-${meta.name}`] = handler.bind(instance);
+        });
+
+        this.logger.log('Job handlers initialized', JSON.stringify(Object.keys(this.jobHandlers)));
+    }
+
     async process(job: Job<any>): Promise<void> {
-        switch (job.name) {
-            case 'sync-employee':
-                await this.syncEmployeeService.run(job.data);
-                break;
-            case 'push-employee':
-                await this.pushEmployeeService.run(job.data);
-                break;
-            case 'error-job':
-                throw new Error('Intentional error for testing purposes');
-            default:
-                console.log('Skipping job:', job.name);
+        const handler = this.jobHandlers[`my-queue-${job.name}`];
+
+        if (handler) {
+            await handler(job.data);
+        } else {
+            this.logger.warn(`No handler found for job: my-queue-${job.name}`);
         }
     }
 }
